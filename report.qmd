@@ -9,9 +9,12 @@ format:
 execute:
   echo: false
   warning: false
-params:
-  close_the_loop: false
 ---
+
+```{python}
+#| tags: [parameters]
+close_the_loop = False
+```
 
 ```{python}
 #| label: setup
@@ -253,7 +256,7 @@ else:
 
 ```{python}
 #| label: close-the-loop
-if params["close_the_loop"]:
+if close_the_loop:
     display(Markdown("## Closing the Loop: Are Resolved Issues Being Communicated?"))
     display(Markdown("When a fix is merged, we should follow up on the original issue — either closing it or commenting to let the reporter know the fix is available. This section identifies open issues that may have linked PRs already merged."))
 
