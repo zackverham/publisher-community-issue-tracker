@@ -9,6 +9,8 @@ format:
 execute:
   echo: false
   warning: false
+params:
+  close_the_loop: false
 ---
 
 ```{python}
@@ -204,20 +206,23 @@ import plotly.express as px
 
 responded_df = df[df["first_response"].notna()].copy()
 responded_df["response_hours"] = responded_df["response_time"].dt.total_seconds() / 3600
+responded_df["issue_label"] = responded_df["number"].apply(lambda n: f"#{n}")
 
-fig = px.bar(
+fig = px.scatter(
     responded_df.sort_values("created"),
-    x=responded_df.sort_values("created")["number"].apply(lambda n: f"#{n}"),
+    x="created",
     y="response_hours",
     color="response_hours",
     color_continuous_scale=["#16a34a", "#ca8a04", "#dc2626"],
-    labels={"x": "Issue", "response_hours": "Hours to First Response"},
+    hover_data={"issue_label": True, "response_hours": ":.1f", "created": True},
+    labels={"created": "Issue Created", "response_hours": "Hours to First Response"},
     title="Time to First Team Response (hours)",
 )
 fig.add_hline(y=24, line_dash="dash", line_color="red", annotation_text="24h target")
+fig.update_traces(marker=dict(size=10, line=dict(width=1, color="white")))
 fig.update_layout(
     showlegend=False,
-    xaxis_title="Issue",
+    xaxis_title="Issue Created",
     yaxis_title="Hours",
     height=400,
     coloraxis_showscale=False,
@@ -246,82 +251,64 @@ else:
     display(Markdown("_All community issues have received at least one team response._"))
 ```
 
-## Closing the Loop: Are Resolved Issues Being Communicated?
-
-When a fix is merged, we should follow up on the original issue — either closing it or commenting to let the reporter know the fix is available. This section identifies open issues that may have linked PRs already merged.
-
 ```{python}
 #| label: close-the-loop
-open_issues = df[df["state"] == "OPEN"].copy()
+if params["close_the_loop"]:
+    display(Markdown("## Closing the Loop: Are Resolved Issues Being Communicated?"))
+    display(Markdown("When a fix is merged, we should follow up on the original issue — either closing it or commenting to let the reporter know the fix is available. This section identifies open issues that may have linked PRs already merged."))
 
-loop_rows = []
-for _, row in open_issues.iterrows():
-    events = fetch_timeline(row["number"])
-    has_pr_ref = len(events) > 0
+    open_issues = df[df["state"] == "OPEN"].copy()
 
-    if pd.notna(row["last_comment_at"]):
-        days_since_activity = (NOW - row["last_comment_at"]).days
-    else:
-        days_since_activity = (NOW - row["created"]).days
+    loop_rows = []
+    for _, row in open_issues.iterrows():
+        events = fetch_timeline(row["number"])
+        has_pr_ref = len(events) > 0
 
-    loop_rows.append({
-        "number": row["number"],
-        "title": row["title"],
-        "created": row["created"],
-        "has_pr_reference": has_pr_ref,
-        "days_since_activity": days_since_activity,
-        "assignees": ", ".join(row["assignees"]) if row["assignees"] else "—",
-    })
+        if pd.notna(row["last_comment_at"]):
+            days_since_activity = (NOW - row["last_comment_at"]).days
+        else:
+            days_since_activity = (NOW - row["created"]).days
 
-loop_df = pd.DataFrame(loop_rows)
+        loop_rows.append({
+            "number": row["number"],
+            "title": row["title"],
+            "created": row["created"],
+            "has_pr_reference": has_pr_ref,
+            "days_since_activity": days_since_activity,
+            "assignees": ", ".join(row["assignees"]) if row["assignees"] else "—",
+        })
 
-if len(loop_df) > 0:
-    stale_threshold = 14
-    stale = loop_df[loop_df["days_since_activity"] >= stale_threshold]
-    pr_linked = loop_df[loop_df["has_pr_reference"]]
+    loop_df = pd.DataFrame(loop_rows)
 
-    if len(pr_linked) > 0:
-        display(Markdown("### Issues With Linked PR References"))
-        display(Markdown("These open issues have cross-referenced PRs — check if the fix has been merged and the issue can be closed."))
+    if len(loop_df) > 0:
+        stale_threshold = 14
+        stale = loop_df[loop_df["days_since_activity"] >= stale_threshold]
+        pr_linked = loop_df[loop_df["has_pr_reference"]]
 
-        pr_display = pr_linked[["number", "title", "days_since_activity", "assignees"]].copy()
-        pr_display["number"] = pr_display["number"].apply(
-            lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
-        )
-        pr_display.columns = ["Issue", "Title", "Days Since Activity", "Assignee"]
-        display(HTML(pr_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+        if len(pr_linked) > 0:
+            display(Markdown("### Issues With Linked PR References"))
+            display(Markdown("These open issues have cross-referenced PRs — check if the fix has been merged and the issue can be closed."))
 
-    if len(stale) > 0:
-        display(Markdown(f"### Stale Issues (No Activity in {stale_threshold}+ Days)"))
-        display(Markdown("These open community issues haven't seen any activity recently and may need follow-up."))
+            pr_display = pr_linked[["number", "title", "days_since_activity", "assignees"]].copy()
+            pr_display["number"] = pr_display["number"].apply(
+                lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
+            )
+            pr_display.columns = ["Issue", "Title", "Days Since Activity", "Assignee"]
+            display(HTML(pr_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
 
-        stale_display = stale[["number", "title", "days_since_activity", "assignees"]].copy()
-        stale_display["number"] = stale_display["number"].apply(
-            lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
-        )
-        stale_display.columns = ["Issue", "Title", "Days Since Activity", "Assignee"]
-        display(HTML(stale_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+        if len(stale) > 0:
+            display(Markdown(f"### Stale Issues (No Activity in {stale_threshold}+ Days)"))
+            display(Markdown("These open community issues haven't seen any activity recently and may need follow-up."))
 
-    if len(pr_linked) == 0 and len(stale) == 0:
-        display(Markdown("_All open issues look healthy — no stale issues or unresolved PR links._"))
-```
+            stale_display = stale[["number", "title", "days_since_activity", "assignees"]].copy()
+            stale_display["number"] = stale_display["number"].apply(
+                lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
+            )
+            stale_display.columns = ["Issue", "Title", "Days Since Activity", "Assignee"]
+            display(HTML(stale_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
 
-## Full Issue List
-
-```{python}
-#| label: full-list
-full = df[["number", "title", "state", "author", "created", "first_response", "comment_count", "assignees"]].copy()
-full["created"] = full["created"].dt.strftime("%Y-%m-%d")
-full["first_response"] = full["first_response"].apply(
-    lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "—"
-)
-full["assignees"] = full["assignees"].apply(lambda a: ", ".join(a) if a else "—")
-full["number"] = full["number"].apply(
-    lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
-)
-full.columns = ["Issue", "Title", "State", "Author", "Created", "First Response", "Comments", "Assignees"]
-
-display(HTML(full.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+        if len(pr_linked) == 0 and len(stale) == 0:
+            display(Markdown("_All open issues look healthy — no stale issues or unresolved PR links._"))
 ```
 
 ---
