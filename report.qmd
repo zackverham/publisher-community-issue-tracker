@@ -1,0 +1,329 @@
+---
+title: "Posit Publisher — Community Issue Tracker"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 2
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+#| label: setup
+import json
+import os
+import requests
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from IPython.display import Markdown, HTML
+import humanize
+
+NOW = datetime.now(timezone.utc)
+REPO = "posit-dev/publisher"
+API_BASE = "https://api.github.com"
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+HEADERS = {"Accept": "application/vnd.github+json"}
+if GITHUB_TOKEN:
+    HEADERS["Authorization"] = f"token {GITHUB_TOKEN}"
+
+
+def gh_paginate(url, params=None):
+    """Fetch all pages from a GitHub API endpoint."""
+    results = []
+    params = params or {}
+    params.setdefault("per_page", 100)
+    while url:
+        resp = requests.get(url, headers=HEADERS, params=params)
+        if not resp.ok:
+            detail = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            raise RuntimeError(
+                f"GitHub API {resp.status_code} for {url}\n"
+                f"Token present: {bool(GITHUB_TOKEN)} (length {len(GITHUB_TOKEN)})\n"
+                f"Response: {detail}"
+            )
+        results.extend(resp.json())
+        url = resp.links.get("next", {}).get("url")
+        params = {}  # params are baked into the 'next' URL
+    return results
+
+
+def fetch_issues():
+    """Fetch all community-labeled issues with their comments."""
+    issues = gh_paginate(
+        f"{API_BASE}/repos/{REPO}/issues",
+        params={"labels": "community", "state": "all", "per_page": 100},
+    )
+    # GitHub's issues endpoint also returns PRs — filter them out
+    issues = [i for i in issues if "pull_request" not in i]
+
+    # Fetch comments for each issue
+    for issue in issues:
+        if issue.get("comments", 0) > 0:
+            comments = gh_paginate(issue["comments_url"])
+            issue["_comments"] = comments
+        else:
+            issue["_comments"] = []
+    return issues
+
+
+def fetch_timeline(issue_number):
+    """Fetch timeline events for an issue to detect cross-referenced PRs."""
+    try:
+        events = gh_paginate(
+            f"{API_BASE}/repos/{REPO}/issues/{issue_number}/timeline",
+        )
+        return [
+            e for e in events
+            if e.get("event") in ("cross-referenced", "referenced")
+        ]
+    except Exception:
+        return []
+
+
+raw = fetch_issues()
+
+# Build a flat dataframe
+rows = []
+for issue in raw:
+    author = issue["user"]["login"]
+    comments = issue.get("_comments", [])
+    created = pd.Timestamp(issue["created_at"])
+
+    # Determine author association for the issue itself
+    issue_author_assoc = issue.get("author_association", "")
+
+    # Find first team response (MEMBER, COLLABORATOR, or OWNER)
+    first_team_response = None
+    for c in comments:
+        assoc = c.get("author_association", "")
+        if assoc in ("MEMBER", "COLLABORATOR", "OWNER"):
+            first_team_response = pd.Timestamp(c["created_at"])
+            break
+
+    label_names = [l["name"] for l in issue.get("labels", [])]
+    assignees = [a["login"] for a in issue.get("assignees", [])]
+
+    rows.append({
+        "number": issue["number"],
+        "title": issue["title"],
+        "state": issue["state"].upper(),
+        "author": author,
+        "created": created,
+        "closed": pd.Timestamp(issue["closed_at"]) if issue["closed_at"] else pd.NaT,
+        "first_response": first_team_response,
+        "response_time": (first_team_response - created) if first_team_response else pd.NaT,
+        "comment_count": len(comments),
+        "last_comment_at": pd.Timestamp(comments[-1]["created_at"]) if comments else pd.NaT,
+        "labels": label_names,
+        "assignees": assignees,
+    })
+
+df = pd.DataFrame(rows)
+df = df.sort_values("created", ascending=False).reset_index(drop=True)
+```
+
+```{python}
+#| label: summary-banner
+open_count = (df["state"] == "OPEN").sum()
+closed_count = (df["state"] == "CLOSED").sum()
+total = len(df)
+
+awaiting = df[(df["state"] == "OPEN") & df["first_response"].isna()]
+awaiting_count = len(awaiting)
+
+one_week_ago = NOW - timedelta(days=7)
+new_this_week = df[df["created"] >= one_week_ago]
+new_count = len(new_this_week)
+
+responded = df[df["first_response"].notna()]
+if len(responded) > 0:
+    median_response = responded["response_time"].median()
+    median_str = humanize.naturaldelta(median_response)
+else:
+    median_str = "N/A"
+
+HTML(f"""
+<div style="display:flex; gap:1rem; flex-wrap:wrap; margin-bottom:1.5rem;">
+  <div style="flex:1; min-width:150px; background:#f0f7ff; border-left:4px solid #2563eb; padding:1rem; border-radius:6px;">
+    <div style="font-size:2rem; font-weight:700; color:#2563eb;">{new_count}</div>
+    <div style="color:#555;">New this week</div>
+  </div>
+  <div style="flex:1; min-width:150px; background:#fef3f2; border-left:4px solid #dc2626; padding:1rem; border-radius:6px;">
+    <div style="font-size:2rem; font-weight:700; color:#dc2626;">{open_count}</div>
+    <div style="color:#555;">Open</div>
+  </div>
+  <div style="flex:1; min-width:150px; background:#f0fdf4; border-left:4px solid #16a34a; padding:1rem; border-radius:6px;">
+    <div style="font-size:2rem; font-weight:700; color:#16a34a;">{closed_count}</div>
+    <div style="color:#555;">Closed</div>
+  </div>
+  <div style="flex:1; min-width:150px; background:#fefce8; border-left:4px solid #ca8a04; padding:1rem; border-radius:6px;">
+    <div style="font-size:2rem; font-weight:700; color:#ca8a04;">{awaiting_count}</div>
+    <div style="color:#555;">Awaiting response</div>
+  </div>
+  <div style="flex:1; min-width:150px; background:#faf5ff; border-left:4px solid #9333ea; padding:1rem; border-radius:6px;">
+    <div style="font-size:2rem; font-weight:700; color:#9333ea;">{median_str}</div>
+    <div style="color:#555;">Median response time</div>
+  </div>
+</div>
+""")
+```
+
+## New Issues This Week
+
+Issues with the **community** label created in the last 7 days.
+
+```{python}
+#| label: new-issues
+if len(new_this_week) == 0:
+    display(Markdown("_No new community issues this week._"))
+else:
+    new_display = new_this_week[["number", "title", "author", "created", "first_response"]].copy()
+    new_display["created"] = new_display["created"].dt.strftime("%Y-%m-%d")
+    new_display["first_response"] = new_display["first_response"].apply(
+        lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "—"
+    )
+    new_display["number"] = new_display["number"].apply(
+        lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
+    )
+    new_display.columns = ["Issue", "Title", "Author", "Created", "First Response"]
+
+    display(HTML(new_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+```
+
+## Engagement: Are We Responding Promptly?
+
+Tracking how quickly community issues receive a first team response helps us ensure reporters feel heard.
+
+```{python}
+#| label: response-times
+import plotly.express as px
+
+responded_df = df[df["first_response"].notna()].copy()
+responded_df["response_hours"] = responded_df["response_time"].dt.total_seconds() / 3600
+
+fig = px.bar(
+    responded_df.sort_values("created"),
+    x=responded_df.sort_values("created")["number"].apply(lambda n: f"#{n}"),
+    y="response_hours",
+    color="response_hours",
+    color_continuous_scale=["#16a34a", "#ca8a04", "#dc2626"],
+    labels={"x": "Issue", "response_hours": "Hours to First Response"},
+    title="Time to First Team Response (hours)",
+)
+fig.add_hline(y=24, line_dash="dash", line_color="red", annotation_text="24h target")
+fig.update_layout(
+    showlegend=False,
+    xaxis_title="Issue",
+    yaxis_title="Hours",
+    height=400,
+    coloraxis_showscale=False,
+)
+fig.show()
+```
+
+```{python}
+#| label: awaiting-response
+if len(awaiting) > 0:
+    display(Markdown("### Issues Still Awaiting a First Response"))
+    display(Markdown("These community issues have **no team reply yet** — they may need attention."))
+
+    awaiting_display = awaiting[["number", "title", "author", "created"]].copy()
+    awaiting_display["age"] = awaiting_display["created"].apply(
+        lambda x: humanize.naturaldelta(NOW - x)
+    )
+    awaiting_display["created"] = awaiting_display["created"].dt.strftime("%Y-%m-%d")
+    awaiting_display["number"] = awaiting_display["number"].apply(
+        lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
+    )
+    awaiting_display.columns = ["Issue", "Title", "Author", "Created", "Age"]
+
+    display(HTML(awaiting_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+else:
+    display(Markdown("_All community issues have received at least one team response._"))
+```
+
+## Closing the Loop: Are Resolved Issues Being Communicated?
+
+When a fix is merged, we should follow up on the original issue — either closing it or commenting to let the reporter know the fix is available. This section identifies open issues that may have linked PRs already merged.
+
+```{python}
+#| label: close-the-loop
+open_issues = df[df["state"] == "OPEN"].copy()
+
+loop_rows = []
+for _, row in open_issues.iterrows():
+    events = fetch_timeline(row["number"])
+    has_pr_ref = len(events) > 0
+
+    if pd.notna(row["last_comment_at"]):
+        days_since_activity = (NOW - row["last_comment_at"]).days
+    else:
+        days_since_activity = (NOW - row["created"]).days
+
+    loop_rows.append({
+        "number": row["number"],
+        "title": row["title"],
+        "created": row["created"],
+        "has_pr_reference": has_pr_ref,
+        "days_since_activity": days_since_activity,
+        "assignees": ", ".join(row["assignees"]) if row["assignees"] else "—",
+    })
+
+loop_df = pd.DataFrame(loop_rows)
+
+if len(loop_df) > 0:
+    stale_threshold = 14
+    stale = loop_df[loop_df["days_since_activity"] >= stale_threshold]
+    pr_linked = loop_df[loop_df["has_pr_reference"]]
+
+    if len(pr_linked) > 0:
+        display(Markdown("### Issues With Linked PR References"))
+        display(Markdown("These open issues have cross-referenced PRs — check if the fix has been merged and the issue can be closed."))
+
+        pr_display = pr_linked[["number", "title", "days_since_activity", "assignees"]].copy()
+        pr_display["number"] = pr_display["number"].apply(
+            lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
+        )
+        pr_display.columns = ["Issue", "Title", "Days Since Activity", "Assignee"]
+        display(HTML(pr_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+
+    if len(stale) > 0:
+        display(Markdown(f"### Stale Issues (No Activity in {stale_threshold}+ Days)"))
+        display(Markdown("These open community issues haven't seen any activity recently and may need follow-up."))
+
+        stale_display = stale[["number", "title", "days_since_activity", "assignees"]].copy()
+        stale_display["number"] = stale_display["number"].apply(
+            lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
+        )
+        stale_display.columns = ["Issue", "Title", "Days Since Activity", "Assignee"]
+        display(HTML(stale_display.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+
+    if len(pr_linked) == 0 and len(stale) == 0:
+        display(Markdown("_All open issues look healthy — no stale issues or unresolved PR links._"))
+```
+
+## Full Issue List
+
+```{python}
+#| label: full-list
+full = df[["number", "title", "state", "author", "created", "first_response", "comment_count", "assignees"]].copy()
+full["created"] = full["created"].dt.strftime("%Y-%m-%d")
+full["first_response"] = full["first_response"].apply(
+    lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "—"
+)
+full["assignees"] = full["assignees"].apply(lambda a: ", ".join(a) if a else "—")
+full["number"] = full["number"].apply(
+    lambda n: f'<a href="https://github.com/{REPO}/issues/{n}" target="_blank">#{n}</a>'
+)
+full.columns = ["Issue", "Title", "State", "Author", "Created", "First Response", "Comments", "Assignees"]
+
+display(HTML(full.to_html(index=False, escape=False, classes="table table-striped table-sm")))
+```
+
+---
+
+<small>Report generated `{python} NOW.strftime("%Y-%m-%d %H:%M UTC")` from [posit-dev/publisher](https://github.com/posit-dev/publisher) issues labeled **community**.</small>

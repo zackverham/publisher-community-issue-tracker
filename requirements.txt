@@ -1,0 +1,6 @@
+jupyter
+pandas
+plotly
+itables
+great_tables
+humanize
